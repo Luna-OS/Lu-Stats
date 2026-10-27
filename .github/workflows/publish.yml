@@ -1,8 +1,9 @@
 name: Publish to Modrinth
 
 # Fully automatic: every push to a version branch whose mod_version + Minecraft version
-# has not been tagged yet builds the jar, publishes it to Modrinth (with the matching
-# CHANGELOG.md section), then creates the git tag and GitHub release.
+# has not been tagged yet builds the jar, publishes it to Modrinth (only when a
+# MODRINTH_TOKEN secret is configured) with the matching CHANGELOG.md section, then
+# creates the git tag and GitHub release.
 on:
   push:
     branches:
@@ -20,6 +21,8 @@ concurrency:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    env:
+      MODRINTH_TOKEN: ${{ secrets.MODRINTH_TOKEN }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -42,11 +45,12 @@ jobs:
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
-      - name: Build and publish to Modrinth
+      - name: Build
         if: steps.meta.outputs.exists == 'false'
-        run: chmod +x gradlew && ./gradlew build modrinth --no-daemon
-        env:
-          MODRINTH_TOKEN: ${{ secrets.MODRINTH_TOKEN }}
+        run: chmod +x gradlew && ./gradlew build --no-daemon
+      - name: Publish to Modrinth
+        if: steps.meta.outputs.exists == 'false' && env.MODRINTH_TOKEN != ''
+        run: ./gradlew modrinth --no-daemon
       - name: Create tag and GitHub release
         if: steps.meta.outputs.exists == 'false'
         env:
