@@ -34,7 +34,8 @@ public abstract class PlayerAdvancementsMixin {
     )
     private void lustats$onAward(final AdvancementHolder holder, final String criterion,
                                  final CallbackInfoReturnable<Boolean> cir) {
-        if (player == null || holder == null) {
+        // Only when this call granted something new: re-granting a finished advancement is no unlock.
+        if (player == null || holder == null || !cir.getReturnValueZ()) {
             return;
         }
         PlayerAdvancements self = (PlayerAdvancements) (Object) this;

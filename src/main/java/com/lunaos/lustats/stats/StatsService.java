@@ -193,6 +193,82 @@ public final class StatsService {
         return server.getWorldPath(LevelResource.PLAYER_STATS_DIR);
     }
 
+    /** Stats shown on the website (after the display.* filters), in catalog order. */
+    public List<StatDescriptor> displayedDescriptors() {
+        List<StatDescriptor> out = new ArrayList<>();
+        for (StatDescriptor descriptor : catalog) {
+            if (isDisplayed(descriptor)) {
+                out.add(descriptor);
+            }
+        }
+        return out;
+    }
+
+    public List<String> featuredKeys() {
+        return new ArrayList<>(config.display.featuredStats);
+    }
+
+    /**
+     * Non-zero displayed stat values of every player not hidden by config: online
+     * players are read live, offline players from their world stats file. Must be
+     * called on the server thread.
+     */
+    public List<PlayerValues> playerValues() {
+        Set<String> displayed = new HashSet<>();
+        for (StatDescriptor descriptor : catalog) {
+            if (isDisplayed(descriptor)) {
+                displayed.add(descriptor.key);
+            }
+        }
+
+        Map<String, String> knownNames = loadKnownNames();
+        Map<String, PlayerValues> players = new LinkedHashMap<>();
+        for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+            GameProfile profile = player.getGameProfile();
+            String id = profile.id().toString();
+            if (isHiddenPlayer(id)) {
+                continue;
+            }
+            Map<String, Integer> values = new HashMap<>();
+            ServerStatsCounter counter = player.getStats();
+            for (StatDescriptor descriptor : catalog) {
+                if (displayed.contains(descriptor.key)) {
+                    int value = counter.getValue(descriptor.stat);
+                    if (value != 0) {
+                        values.put(descriptor.key, value);
+                    }
+                }
+            }
+            players.put(id, new PlayerValues(id, profile.name(), true, values));
+        }
+
+        if (config.display.showOfflinePlayers) {
+            List<String> unnamed = new ArrayList<>();
+            for (Path file : statFiles()) {
+                String id = idFromStatsFile(file);
+                if (id == null || uuidFromStatsFile(file) == null || isHiddenPlayer(id) || players.containsKey(id)) {
+                    continue;
+                }
+                Map<String, Integer> values = new HashMap<>();
+                for (Map.Entry<String, Integer> entry : readStatsFile(file).entrySet()) {
+                    if (entry.getValue() != 0 && displayed.contains(entry.getKey())) {
+                        values.put(entry.getKey(), entry.getValue());
+                    }
+                }
+                String name = knownNames.getOrDefault(id, id);
+                if (name.equals(id)) {
+                    unnamed.add(id);
+                }
+                players.put(id, new PlayerValues(id, name, false, values));
+            }
+            nameResolver.requestMissing(unnamed);
+        }
+        return new ArrayList<>(players.values());
+    }
+
+    public record PlayerValues(String uuid, String name, boolean online, Map<String, Integer> values) {
+    }
+
     private PlayerStatsDto fromOnlinePlayer(final ServerPlayer player) {
         Map<String, Integer> rawValues = new HashMap<>();
         ServerStatsCounter counter = player.getStats();

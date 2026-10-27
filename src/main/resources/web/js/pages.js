@@ -4,6 +4,7 @@ import { $, esc, nf, pct, api, debounce, ago, fmtDate, fmtDateTime, fmtIso, fram
 import * as px from "./pixel.js";
 import { S, loadPlayers, loadPlayer, isDone, gotGroups, statValue, fraction, visible, counted } from "./store.js";
 import { createExplorer, detailHTML, checklistHTML, progressHTML, rewardTags } from "./explorer.js";
+import { mountPlayerStats, compareStatsHTML, loadRecentDeaths, recentDeathsHTML } from "./stats.js";
 
 const sameName = (a, b) => String(a || "").toLowerCase() === String(b || "").toLowerCase();
 const playerLink = (name) => "/spieler/" + encodeURIComponent(name);
@@ -32,7 +33,9 @@ function setTitle(t) { document.title = t ? `${t} – ${S.info.title}` : S.info.
 // ---------------------------------------------------------------- Start
 export async function startPage(view, nav) {
   setTitle("");
-  await loadPlayers();
+  let deaths;
+  [, deaths] = await Promise.all([loadPlayers(), loadRecentDeaths(5)]);
+  let freshDeath = null;
   const draw = () => {
     const ps = S.players;
     const total = S.total;
@@ -55,7 +58,7 @@ export async function startPage(view, nav) {
       <section class="mc-panel hero">
         <div>
           <h1 class="h1">${esc(S.info.title)}</h1>
-          <p class="lead">Wer hat welche Advancements aus BlazeandCave's Advancements Pack? Was fehlt dir noch? Alles live vom Server.</p>
+          <p class="lead">Wer hat welche Advancements aus BlazeandCave's Advancements Pack? Was fehlt dir noch? Wer ist wie gestorben? Alles live vom Server.</p>
           <div class="meta">
             <span>BACAP <b>${esc(m.version || S.info.docVersion || "?")}</b></span>
             ${m.mcVersion ? `<span>Minecraft <b>${esc(m.mcVersion)}</b></span>` : ""}
@@ -67,6 +70,8 @@ export async function startPage(view, nav) {
         </div>
         <div style="display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end">
           <a class="mc-btn" href="/alle" data-link>Alle Advancements</a>
+          <a class="mc-btn" href="/stats" data-link>Statistiken</a>
+          <a class="mc-btn" href="/tode" data-link>Tode</a>
           ${m.baseline ? `<a class="mc-btn" href="/neu" data-link>Neu &amp; geändert</a>` : ""}
           <a class="mc-btn" href="/vergleich" data-link>Spieler vergleichen</a>
         </div>
@@ -82,11 +87,18 @@ export async function startPage(view, nav) {
             <div style="overflow-x:auto"><table class="rank"><thead><tr><th>#</th><th>Spieler</th><th>Erledigt</th><th class="hide-sm">Fortschritt</th><th class="hide-sm">XP</th><th class="hide-sm">Zuletzt</th></tr></thead><tbody>${rank}</tbody></table></div>
           </section>` : ""}
         </div>
-        <section class="mc-panel">
-          <div class="section-head"><h2 class="h2">Zuletzt freigeschaltet</h2></div>
-          <ul class="feed" id="feed">${feedHTML()}</ul>
-        </section>
+        <div>
+          <section class="mc-panel">
+            <div class="section-head"><h2 class="h2">Zuletzt freigeschaltet</h2></div>
+            <ul class="feed" id="feed">${feedHTML()}</ul>
+          </section>
+          <section class="mc-panel">
+            <div class="section-head"><h2 class="h2">Letzte Tode</h2><a class="faint" href="/tode" data-link style="font-size:13px">Alle Tode</a></div>
+            <ul class="feed evlist">${recentDeathsHTML(deaths, freshDeath)}</ul>
+          </section>
+        </div>
       </div>`;
+    freshDeath = null;
   };
   const feedHTML = () => {
     // Auch versteckte: wer sie hier sieht, sieht sie bei einem Spieler, der sie schon hat (wie die Chat-Meldung im Spiel).
@@ -111,22 +123,77 @@ export async function startPage(view, nav) {
     window.scrollTo(0, y);
   }, 400);
   return {
-    onEvent(type) { if (type === "progress" || type === "player" || type === "players" || type === "stats") refetch(); },
+    onEvent(type, d) {
+      if (type === "feed" && d.type === "death" && !deaths.some((e) => e.seq === d.seq)) {
+        deaths = [d, ...deaths].slice(0, 5);
+        freshDeath = d.seq;
+        const y = window.scrollY;
+        draw();
+        window.scrollTo(0, y);
+      }
+      if (type === "progress" || type === "player" || type === "players" || type === "stats") refetch();
+    },
     destroy() {}
   };
 }
 
 // ---------------------------------------------------------------- Spieler
-export async function playerPage(view, name, nav) {
+function playerHeadHTML(P, sub) {
+  return `${avatarHTML(P.name)}
+    <div class="who"><h1 class="h1">${esc(P.name)}</h1>
+      <div style="margin-top:6px">${onlineHTML(P)}</div>
+      <div class="actions">
+        <a class="mc-btn small" href="${playerLink(P.name)}" data-link aria-pressed="${sub !== "stats"}">Advancements</a>
+        <a class="mc-btn small" href="${playerLink(P.name)}/stats" data-link aria-pressed="${sub === "stats"}">Statistiken</a>
+        <a class="mc-btn small" href="/vergleich/${encodeURIComponent(P.name)}" data-link>Vergleichen</a>
+        <button type="button" class="mc-btn small" data-act="copy">Link kopieren</button>
+      </div>
+    </div>
+    ${xpHTML(P.done, S.total, xpLabel(P, S.total))}`;
+}
+function copyLink(btn, url) {
+  (navigator.clipboard ? navigator.clipboard.writeText(url) : Promise.reject()).then(() => { btn.textContent = "Kopiert!"; }, () => { prompt("Link zu dieser Seite:", url); });
+  setTimeout(() => { btn.textContent = "Link kopieren"; }, 1800);
+}
+
+async function playerStatsView(view, P, nav) {
+  view.innerHTML = `<section class="mc-panel player-head" data-x="head">${playerHeadHTML(P, "stats")}</section><div data-x="stats"></div>`;
+  const X = (k) => view.querySelector(`[data-x="${k}"]`);
+  let st;
+  try {
+    st = await mountPlayerStats(X("stats"), P.name, nav);
+  } catch {
+    X("stats").innerHTML = `<div class="mc-panel empty"><b>Keine Statistiken</b>Für ${esc(P.name)} gibt es noch keine Statistiken.</div>`;
+    st = { onEvent() {}, destroy() {} };
+  }
+  function onClick(e) {
+    const b = e.target.closest('[data-act="copy"]');
+    if (b) copyLink(b, location.origin + playerLink(P.name) + "/stats");
+  }
+  view.addEventListener("click", onClick);
+  const refetchHead = debounce(async () => {
+    try { P = await loadPlayer(P.name); X("head").innerHTML = playerHeadHTML(P, "stats"); } catch { /* egal */ }
+  }, 400);
+  return {
+    onEvent(type, d) {
+      st.onEvent(type, d);
+      if ((type === "progress" || type === "player") && sameName(d.player, P.name)) refetchHead();
+    },
+    destroy() { st.destroy(); view.removeEventListener("click", onClick); }
+  };
+}
+
+export async function playerPage(view, name, nav, sub) {
   let P;
   try {
     P = await loadPlayer(name);
   } catch (e) {
     setTitle("Spieler nicht gefunden");
-    errorPanel(view, "Spieler nicht gefunden", `Kein Spieler „${esc(name)}“ – entweder war er noch nie auf dem Server, oder er hat sich mit <span class="px">/bacap privat</span> ausgeblendet. <a href="/" data-link>Zur Startseite</a>`);
+    errorPanel(view, "Spieler nicht gefunden", `Kein Spieler „${esc(name)}“ – entweder war er noch nie auf dem Server, oder er ist mit <span class="px">/lustats privat</span> ausgeblendet. <a href="/" data-link>Zur Startseite</a>`);
     return { onEvent() {}, destroy() {} };
   }
-  setTitle(P.name);
+  setTitle(sub === "stats" ? `${P.name}: Statistiken` : P.name);
+  if (sub === "stats") return playerStatsView(view, P, nav);
   view.innerHTML = `
     <section class="mc-panel player-head" data-x="head"></section>
     <section class="mc-panel"><div class="section-head"><h2 class="h2">Fortschritt pro Tab</h2></div><div class="grid tabs-grid" data-x="tabs"></div></section>
@@ -156,15 +223,7 @@ export async function playerPage(view, name, nav) {
     return a.stat && sv != null ? statPair(a.stat, sv) : `${gotGroups(P, a)}/${a.groups.length}`;
   }
   function drawHead() {
-    X("head").innerHTML = `${avatarHTML(P.name)}
-      <div class="who"><h1 class="h1">${esc(P.name)}</h1>
-        <div style="margin-top:6px">${onlineHTML(P)}</div>
-        <div class="actions">
-          <a class="mc-btn small" href="/vergleich/${encodeURIComponent(P.name)}" data-link>Vergleichen</a>
-          <button type="button" class="mc-btn small" data-act="copy">Link kopieren</button>
-        </div>
-      </div>
-      ${xpHTML(P.done, S.total, xpLabel(P, S.total))}`;
+    X("head").innerHTML = playerHeadHTML(P, "");
   }
   function drawTabs() {
     X("tabs").innerHTML = S.TABS.map((t) => {
@@ -218,12 +277,8 @@ export async function playerPage(view, name, nav) {
     }
     if (e.target.closest('[data-act="moremissing"]')) { showAllMissing = true; drawMissing(); return; }
     if (e.target.closest('[data-act="allopen"]')) { ex.showOpen(); return; }
-    if (e.target.closest('[data-act="copy"]')) {
-      const url = location.origin + playerLink(P.name);
-      const btn = e.target.closest("button");
-      (navigator.clipboard ? navigator.clipboard.writeText(url) : Promise.reject()).then(() => { btn.textContent = "Kopiert!"; }, () => { prompt("Link zu dieser Seite:", url); });
-      setTimeout(() => { btn.textContent = "Link kopieren"; }, 1800);
-    }
+    const copy = e.target.closest('[data-act="copy"]');
+    if (copy) copyLink(copy, location.origin + playerLink(P.name));
   }
   function onToggle(e) {
     const d = e.target.closest && e.target.closest("details[data-mid]");
@@ -344,11 +399,12 @@ export async function advancementPage(view, id, nav) {
 export async function comparePage(view, nameA, nameB, nav) {
   setTitle("Vergleich");
   await loadPlayers();
-  let A = null, B = null, filterTab = "";
+  let A = null, B = null, filterTab = "", statsHTML = "";
   const opts = (sel) => S.players.map((p) => `<option value="${esc(p.name)}"${sameName(p.name, sel) ? " selected" : ""}>${esc(p.name)}</option>`).join("");
   async function load() {
     A = nameA ? await loadPlayer(nameA).catch(() => null) : null;
     B = nameB ? await loadPlayer(nameB).catch(() => null) : null;
+    statsHTML = A && B ? await compareStatsHTML(A.name, B.name).catch(() => "") : "";
   }
   function draw() {
     let body = "";
@@ -369,6 +425,7 @@ export async function comparePage(view, nameA, nameB, nav) {
           <section class="mc-panel"><div class="section-head"><h2 class="h2">${avatarHTML(A.name, "sm")} ${esc(A.name)}</h2>${onlineHTML(A)}</div>${xpHTML(A.done, S.total, xpLabel(A, S.total))}</section>
           <section class="mc-panel"><div class="section-head"><h2 class="h2">${avatarHTML(B.name, "sm")} ${esc(B.name)}</h2>${onlineHTML(B)}</div>${xpHTML(B.done, S.total, xpLabel(B, S.total))}</section>
         </div>
+        ${statsHTML}
         <section class="mc-panel"><div class="section-head"><h2 class="h2">Pro Tab</h2><span class="faint" style="font-size:13px">grün = liegt vorn</span></div>
           <div style="overflow-x:auto"><table class="vs-table"><tbody>${rows}</tbody></table></div></section>
         <section class="mc-panel">
@@ -409,7 +466,7 @@ export async function comparePage(view, nameA, nameB, nav) {
   view.addEventListener("change", onChange);
   const refetch = debounce(async () => { await load(); draw(); }, 400);
   return {
-    onEvent(type, d) { if ((type === "progress" || type === "stats") && (sameName(d.player, nameA) || sameName(d.player, nameB))) refetch(); },
+    onEvent(type, d) { if ((type === "progress" || type === "stats" || type === "feed") && (sameName(d.player, nameA) || sameName(d.player, nameB))) refetch(); },
     destroy() { view.removeEventListener("submit", onSubmit); view.removeEventListener("change", onChange); }
   };
 }

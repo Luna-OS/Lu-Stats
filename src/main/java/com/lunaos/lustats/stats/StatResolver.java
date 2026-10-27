@@ -1,9 +1,11 @@
 package com.lunaos.lustats.stats;
 
+import com.lunaos.lustats.mixin.StatAccessor;
 import net.minecraft.core.Registry;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.Identifier;
 import net.minecraft.stats.Stat;
+import net.minecraft.stats.StatFormatter;
 import net.minecraft.stats.StatType;
 import net.minecraft.stats.Stats;
 
@@ -162,15 +164,31 @@ public final class StatResolver {
 
             String typeString = typeId.toString();
             String valueString = valueId.toString();
+            Stat<T> stat = type.get(value);
             catalog.add(new StatDescriptor(
                 key(typeString, valueString),
                 typeString,
                 valueString,
                 categoryName(typeId),
                 statName(typeId, valueId),
-                type.get(value)
+                unit(stat),
+                stat
             ));
         }
+    }
+
+    private static String unit(final Stat<?> stat) {
+        StatFormatter formatter = ((StatAccessor) stat).lustats$getFormatter();
+        if (formatter == StatFormatter.TIME) {
+            return "time";
+        }
+        if (formatter == StatFormatter.DISTANCE) {
+            return "distance";
+        }
+        if (formatter == StatFormatter.DIVIDE_BY_TEN) {
+            return "damage";
+        }
+        return "count";
     }
 
     private static void ensureVanillaStatsLoaded() {

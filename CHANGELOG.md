@@ -2,6 +2,46 @@
 
 All notable changes to Lu-Stats will be documented in this file.
 
+## [1.2.0] - 2026-10-27
+
+### Added
+- **Statistics are back on the website**, now in the BACAP style: a stats page
+  with who is online/AFK, featured leaderboards, every statistic (searchable,
+  by category) and a map of where everyone plays.
+- **Leaderboard per stat** (`/stats/<type>/<stat>`, e.g. `/stats/custom/jump`)
+  with ties sharing a place, values in their unit (time, distance, hearts).
+- **Deaths page**: total deaths, deaths by cause, deadliest mobs, most deaths,
+  PvP and a searchable live death log with the vanilla death message, killer
+  and location.
+- **Live page**: deaths and earned advancements as they happen, plus a 24-hour
+  chart. Deaths also pop up as toasts on every page, like advancements.
+- **Player stats tab** (`/spieler/<name>/stats`): featured stats with the
+  player's rank, all stats by category, recent deaths with causes and killers,
+  activity (active/AFK time, position) and the player's movement map.
+- Stats comparison on the "Vergleich" page; latest deaths on the start page.
+- Active and AFK time as their own leaderboards.
+- New API: `/api/stats/catalog`, `/api/stats/overview`, `/api/stats/top`,
+  `/api/stats/player`, `/api/feed`, `/api/deaths`, `/api/movement`, and an SSE
+  `feed` event.
+
+### Fixed
+- `/lustats hide` had no effect on the website since 1.1.0; hidden players are
+  now left out everywhere (pages, leaderboards, feed, deaths, map). A death
+  caused by a hidden player no longer names them.
+- Real player heads did not work on offline-mode servers for players who had
+  joined (the user cache held their offline UUID); skins are now looked up by
+  name at Mojang, without writing to the server's `usercache.json`.
+- Old 64×32 skins (e.g. Notch's) rendered as a black square; the hat layer is
+  now ignored for them like in the game.
+- Only players shown on the dashboard trigger skin lookups, and the head cache
+  is bounded.
+- Re-granting an already finished advancement no longer shows up as a new
+  unlock in the feed.
+- The live badge reconnects by itself after the server turned a connection away.
+
+### Removed
+- The unused 1.0 dashboard page that was still bundled in the jar.
+
 ## [1.1.0] - 2026-10-27
 
 ### Added
