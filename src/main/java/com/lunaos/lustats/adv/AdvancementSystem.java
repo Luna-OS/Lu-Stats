@@ -3,6 +3,7 @@ package com.lunaos.lustats.adv;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.lunaos.lustats.LuStatsMod;
+import com.lunaos.lustats.stats.StatsApi;
 import net.minecraft.advancements.AdvancementHolder;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
@@ -35,6 +36,8 @@ public final class AdvancementSystem {
 
     private volatile List<ProgressReader.PlayerProgress> snapshot = new ArrayList<>();
     private volatile List<Dtos.Recent> recent = new ArrayList<>();
+    /** Lower-cased names of the players the dashboard shows (for head lookups). */
+    private volatile Set<String> shownNames = Set.of();
     private volatile long builtAt;
     private long started;
 
@@ -162,7 +165,7 @@ public final class AdvancementSystem {
     }
 
     public byte[] head(final String name) {
-        return heads.head(server, name);
+        return heads.head(server, name, shownNames.contains(name == null ? "" : name.toLowerCase(java.util.Locale.ROOT)));
     }
 
     private Dtos.Head head(final ProgressReader.PlayerProgress p) {
@@ -190,7 +193,7 @@ public final class AdvancementSystem {
         for (ServerPlayer player : server.getPlayerList().getPlayers()) {
             String uuid = player.getGameProfile().id().toString();
             consent.rememberName(player.getGameProfile().id(), player.getGameProfile().name());
-            if (consent.isHidden(uuid)) {
+            if (LuStatsMod.hiddenOnWeb(uuid)) {
                 continue;
             }
             list.add(ProgressReader.online(server, index, player));
@@ -203,7 +206,7 @@ public final class AdvancementSystem {
                 LuStatsMod.LOGGER.warn("Lu-Stats: capped offline player scan at {} (more exist).", MAX_OFFLINE);
                 break;
             }
-            if (consent.isHidden(entry.getKey())) {
+            if (LuStatsMod.hiddenOnWeb(entry.getKey())) {
                 continue;
             }
             String name = knownNames.getOrDefault(entry.getKey(), entry.getKey());
@@ -226,6 +229,13 @@ public final class AdvancementSystem {
             recentList = new ArrayList<>(recentList.subList(0, RECENT_MAX));
         }
 
+        Set<String> names = new java.util.HashSet<>();
+        for (ProgressReader.PlayerProgress p : list) {
+            if (p.name != null) {
+                names.add(p.name.toLowerCase(java.util.Locale.ROOT));
+            }
+        }
+        this.shownNames = names;
         this.snapshot = list;
         this.recent = recentList;
         this.builtAt = now;
@@ -257,7 +267,7 @@ public final class AdvancementSystem {
         if (entry == null) {
             return;
         }
-        if (consent.isHidden(player.getGameProfile().id())) {
+        if (LuStatsMod.hiddenOnWeb(player.getGameProfile().id().toString())) {
             invalidate();
             return;
         }
@@ -285,15 +295,22 @@ public final class AdvancementSystem {
     public void onJoin(final ServerPlayer player) {
         consent.rememberName(player.getGameProfile().id(), player.getGameProfile().name());
         invalidate();
-        if (live && !consent.isHidden(player.getGameProfile().id())) {
+        if (live && !LuStatsMod.hiddenOnWeb(player.getGameProfile().id().toString())) {
             sse.broadcast("player", "{\"player\":" + GSON.toJson(player.getGameProfile().name()) + ",\"online\":true}");
         }
     }
 
     public void onLeave(final ServerPlayer player) {
         invalidate();
-        if (live && !consent.isHidden(player.getGameProfile().id())) {
+        if (live && !LuStatsMod.hiddenOnWeb(player.getGameProfile().id().toString())) {
             sse.broadcast("player", "{\"player\":" + GSON.toJson(player.getGameProfile().name()) + ",\"online\":false}");
+        }
+    }
+
+    /** Pushes a death or advancement to the live feed; null (a hidden player) is ignored. */
+    public void broadcastFeed(final StatsApi.EventDto event) {
+        if (live && event != null) {
+            sse.broadcast("feed", GSON.toJson(event));
         }
     }
 

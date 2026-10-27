@@ -5,11 +5,12 @@ import com.google.gson.JsonParser;
 import com.lunaos.lustats.LuStatsMod;
 import com.mojang.authlib.GameProfile;
 import com.mojang.authlib.properties.Property;
+import com.mojang.authlib.services.ProfileResult;
+import com.mojang.authlib.services.response.NameAndId;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
 
 import javax.imageio.ImageIO;
-import java.awt.Graphics2D;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
@@ -26,21 +27,27 @@ import java.util.concurrent.ConcurrentHashMap;
  * Resolves a player's real skin head server-side and serves it as a PNG, so the
  * dashboard can show current skins while keeping the strict same-origin CSP
  * (img-src 'self'). Resolution: online player's texture property, else a
- * name lookup via the profile resolver (works on offline-mode servers too).
- * Results are cached; a deterministic generated head is the fallback.
+ * Mojang lookup by name (works on offline-mode servers too). Only players the
+ * dashboard shows are looked up; results are cached; a deterministic generated
+ * head is the fallback.
  */
 public final class HeadService {
     private static final int OUT = 64;
     private static final long OK_TTL = 15 * 60_000L;
     private static final long FAIL_TTL = 60_000L;
+    private static final int MAX_CACHED = 1000;
 
     private record Cached(byte[] png, long expires) {
     }
 
     private final ConcurrentHashMap<String, Cached> cache = new ConcurrentHashMap<>();
 
-    public byte[] head(final MinecraftServer server, final String rawName) {
+    /** {@code lookup} false (a name the dashboard does not show) skips the Mojang lookup. */
+    public byte[] head(final MinecraftServer server, final String rawName, final boolean lookup) {
         String name = rawName == null ? "" : rawName.trim();
+        if (!lookup) {
+            return toPng(generated(name));
+        }
         String key = name.toLowerCase(Locale.ROOT);
         Cached cached = cache.get(key);
         long now = System.currentTimeMillis();
@@ -65,27 +72,35 @@ public final class HeadService {
         if (!ok) {
             png = toPng(generated(name));
         }
+        if (cache.size() >= MAX_CACHED) {
+            cache.clear();
+        }
         cache.put(key, new Cached(png, now + (ok ? OK_TTL : FAIL_TTL)));
         return png;
     }
 
     private String resolveSkinUrl(final MinecraftServer server, final String name) {
-        GameProfile profile = null;
         ServerPlayer online = server.getPlayerList().getPlayerByName(name);
         if (online != null) {
-            profile = online.getGameProfile();
-            String fromOnline = urlFromProfile(profile);
+            String fromOnline = urlFromProfile(online.getGameProfile());
             if (fromOnline != null) {
                 return fromOnline;
             }
         }
+        // Ask Mojang for the account with this name. Not via the server's profile
+        // resolver: on offline-mode servers its user cache maps the name to the
+        // offline UUID, which has no skin. The repository lookup also leaves the
+        // server's usercache.json untouched.
         try {
-            Optional<GameProfile> resolved = server.services().profileResolver().fetchByName(name);
-            if (resolved.isPresent()) {
-                return urlFromProfile(resolved.get());
+            Optional<NameAndId> account = server.services().profileRepository().findProfileByName(name);
+            if (account.isPresent()) {
+                ProfileResult result = server.services().sessionService().fetchProfile(account.get().id(), false);
+                if (result != null) {
+                    return urlFromProfile(result.profile());
+                }
             }
         } catch (Exception exception) {
-            LuStatsMod.LOGGER.debug("profileResolver failed for {}: {}", name, exception.toString());
+            LuStatsMod.LOGGER.debug("Mojang profile lookup failed for {}: {}", name, exception.toString());
         }
         return null;
     }
@@ -128,16 +143,55 @@ public final class HeadService {
     }
 
     private BufferedImage cropHead(final BufferedImage skin) {
-        BufferedImage head = new BufferedImage(OUT, OUT, BufferedImage.TYPE_INT_ARGB);
-        Graphics2D g = head.createGraphics();
-        // Base face 8x8 at (8,8).
-        g.drawImage(skin, 0, 0, OUT, OUT, 8, 8, 16, 16, null);
-        // Hat/overlay 8x8 at (40,8), composited on top if present.
-        if (skin.getWidth() >= 48 && skin.getHeight() >= 16) {
-            g.drawImage(skin, 0, 0, OUT, OUT, 40, 8, 48, 16, null);
+        // Like the game: the face is always opaque, and an old 64x32 skin whose
+        // overlay area has no transparent pixel gets no hat layer (otherwise
+        // skins like Notch's turn into a solid black square).
+        boolean hat = skin.getWidth() >= 48 && skin.getHeight() >= 16
+            && !(skin.getHeight() == 32 && opaque(skin, 32, 0, 64, 32));
+        int[] face = new int[64];
+        for (int y = 0; y < 8; y++) {
+            for (int x = 0; x < 8; x++) {
+                int argb = skin.getRGB(8 + x, 8 + y) | 0xff000000;
+                if (hat) {
+                    argb = over(skin.getRGB(40 + x, 8 + y), argb);
+                }
+                face[y * 8 + x] = argb;
+            }
         }
-        g.dispose();
+        BufferedImage head = new BufferedImage(OUT, OUT, BufferedImage.TYPE_INT_ARGB);
+        int cell = OUT / 8;
+        for (int y = 0; y < OUT; y++) {
+            for (int x = 0; x < OUT; x++) {
+                head.setRGB(x, y, face[(y / cell) * 8 + x / cell]);
+            }
+        }
         return head;
+    }
+
+    private static boolean opaque(final BufferedImage image, final int x0, final int y0, final int x1, final int y1) {
+        for (int y = y0; y < Math.min(y1, image.getHeight()); y++) {
+            for (int x = x0; x < Math.min(x1, image.getWidth()); x++) {
+                if ((image.getRGB(x, y) >>> 24) < 128) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    /** Source-over blend of {@code top} onto an opaque {@code bottom}. */
+    private static int over(final int top, final int bottom) {
+        int a = top >>> 24;
+        if (a == 0) {
+            return bottom;
+        }
+        if (a == 255) {
+            return top;
+        }
+        int r = (((top >> 16) & 0xff) * a + ((bottom >> 16) & 0xff) * (255 - a)) / 255;
+        int g = (((top >> 8) & 0xff) * a + ((bottom >> 8) & 0xff) * (255 - a)) / 255;
+        int b = ((top & 0xff) * a + (bottom & 0xff) * (255 - a)) / 255;
+        return 0xff000000 | (r << 16) | (g << 8) | b;
     }
 
     /** Deterministic fallback head when no skin can be resolved. */

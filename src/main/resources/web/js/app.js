@@ -3,6 +3,7 @@ import { $, $$, esc, api, debounce, frameHTML, toastTitle, ICON, fmtIso } from "
 import * as px from "./pixel.js";
 import { S, loadIndex, loadPlayers, setSpoiler } from "./store.js";
 import { startPage, playerPage, advancementPage, comparePage, explorerPage, notFoundPage } from "./pages.js";
+import { statsPage, boardPage, deathsPage, livePage, deathText, causeIcon, mobIcon } from "./stats.js";
 
 const view = $("#view");
 let current = null;
@@ -62,7 +63,15 @@ async function route(keepScroll) {
     if (path === "/" || path === "/rangliste") page = () => startPage(view, navigate);
     else if (path === "/alle") { nav = "alle"; page = () => explorerPage(view, "all", navigate); }
     else if (path === "/neu") { nav = "neu"; page = () => explorerPage(view, "changes", navigate); }
-    else if (path.startsWith("/spieler/")) { nav = ""; const name = path.slice(9).replace(/\/+$/, ""); page = () => playerPage(view, name, navigate); }
+    else if (path.startsWith("/spieler/")) {
+      nav = "";
+      const [name, sub] = path.slice(9).split("/").filter(Boolean);
+      page = () => playerPage(view, name || "", navigate, sub);
+    }
+    else if (path === "/stats") { nav = "stats"; page = () => statsPage(view, navigate); }
+    else if (path.startsWith("/stats/")) { nav = "stats"; page = () => boardPage(view, path.slice(7), navigate); }
+    else if (path === "/tode") { nav = "tode"; page = () => deathsPage(view, navigate); }
+    else if (path === "/live") { nav = "live"; page = () => livePage(view, navigate); }
     else if (path.startsWith("/advancement/")) { nav = "alle"; page = () => advancementPage(view, path.slice(13), navigate); }
     else if (path === "/vergleich" || path.startsWith("/vergleich/")) {
       nav = "vergleich";
@@ -103,11 +112,15 @@ function flushToasts() {
     showToast(a, t.text, t.ch, `<b>${esc(d.player)}</b>: ${esc(a.title || d.title)}`);
   });
 }
-function showToast(a, title, ch, bodyHTML) {
+function deathToast(d) {
+  const icon = d.killerType ? mobIcon(d.killerType) : causeIcon(d.cause);
+  showToast({ id: "", frame: "task", icon, title: "" }, "Gestorben!", false, `<b>${esc(d.player)}</b>: ${deathText(d)}`, { cls: "death", done: false });
+}
+function showToast(a, title, ch, bodyHTML, opts = {}) {
   const box = $("#toasts");
   const el = document.createElement("div");
   el.className = "toast";
-  el.innerHTML = `${frameHTML(a, true, "s39")}<div style="min-width:0"><div class="t1${ch ? " ch" : ""}">${esc(title)}</div><div class="t2">${bodyHTML}</div></div>`;
+  el.innerHTML = `${frameHTML(a, opts.done !== false, "s39")}<div style="min-width:0"><div class="t1${ch ? " ch" : ""}${opts.cls ? " " + opts.cls : ""}">${esc(title)}</div><div class="t2">${bodyHTML}</div></div>`;
   box.appendChild(el);
   while (box.children.length > 4) box.firstElementChild.remove();
   requestAnimationFrame(() => requestAnimationFrame(() => el.classList.add("show")));
@@ -133,16 +146,22 @@ function connect() {
     if (connectedOnce) loadPlayers().then(() => route(true), () => {});
     connectedOnce = true;
   });
-  es.onerror = () => { live.classList.remove("on"); live.title = "Live-Verbindung unterbrochen, verbinde neu …"; };
+  es.onerror = () => {
+    live.classList.remove("on");
+    live.title = "Live-Verbindung unterbrochen, verbinde neu …";
+    // Abgewiesen (z. B. zu viele Verbindungen): der Browser gibt dann auf, also selbst später neu verbinden.
+    if (es.readyState === EventSource.CLOSED) setTimeout(connect, 15000);
+  };
   const handle = (type) => (e) => {
     let d = {};
     try { d = JSON.parse(e.data); } catch { return; }
     if (type === "index") { reloadIndex(); return; }
     if (type === "progress" && d.kind === "done") toast(d);
-    if (type !== "stats") refreshPlayers();
+    if (type === "feed" && d.type === "death") deathToast(d);
+    if (type !== "stats" && type !== "feed") refreshPlayers();
     if (current && current.onEvent) { try { current.onEvent(type, d); } catch { /* Seite kümmert sich selbst */ } }
   };
-  for (const type of ["progress", "player", "players", "stats", "index"]) es.addEventListener(type, handle(type));
+  for (const type of ["progress", "player", "players", "stats", "index", "feed"]) es.addEventListener(type, handle(type));
 }
 
 // ---------------------------------------------------------------- Start

@@ -158,16 +158,26 @@ public final class ActivityTracker {
     /** Movement detail for one player, or aggregated across all when id is null/blank. */
     public MovementDto movement(final String playerId, final int maxPoints) {
         synchronized (lock) {
+            List<String> ids = playerId == null || playerId.isBlank() ? new ArrayList<>(players.keySet()) : List.of(playerId);
+            MovementDto dto = movementOf(ids, maxPoints);
+            dto.playerId = playerId;
+            return dto;
+        }
+    }
+
+    /** Movement of the given players: merged heatmap, plus the path when exactly one player is selected. */
+    public MovementDto movementOf(final java.util.Collection<String> playerIds, final int maxPoints) {
+        synchronized (lock) {
             MovementDto dto = new MovementDto();
             dto.bucketSize = Math.max(1, config.movementBucketSize);
-            dto.playerId = playerId;
 
             Map<String, Integer> mergedHeat = new LinkedHashMap<>();
             List<PlayerActivity> selected = new ArrayList<>();
-            if (playerId == null || playerId.isBlank()) {
-                selected.addAll(players.values());
-            } else if (players.containsKey(playerId)) {
-                selected.add(players.get(playerId));
+            for (String id : playerIds) {
+                PlayerActivity activity = players.get(id);
+                if (activity != null) {
+                    selected.add(activity);
+                }
             }
 
             for (PlayerActivity activity : selected) {

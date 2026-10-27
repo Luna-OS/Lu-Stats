@@ -59,6 +59,7 @@ public final class EventHooks {
                 }
             }
             log.add(event);
+            LuStatsMod.onGameEvent(event);
         });
     }
 
@@ -97,6 +98,7 @@ public final class EventHooks {
             event.advancementKind = "task";
         }
         log.add(event);
+        LuStatsMod.onGameEvent(event);
     }
 
     private static void fillPosition(final GameEvent event, final ServerPlayer player) {

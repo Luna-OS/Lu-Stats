@@ -5,6 +5,7 @@ import com.google.gson.GsonBuilder;
 import com.lunaos.lustats.LuStatsMod;
 import com.lunaos.lustats.adv.AdvancementSystem;
 import com.lunaos.lustats.config.LuStatsConfig;
+import com.lunaos.lustats.stats.StatsApi;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import net.minecraft.server.MinecraftServer;
@@ -31,8 +32,9 @@ import java.util.zip.GZIPOutputStream;
 
 /**
  * Serves the BACAP-style dashboard: the static {@code /web} single-page app plus
- * the advancement JSON API, a player-head proxy and a live SSE stream. Player
- * data is built on the server thread; heads and SSE run on the web executor.
+ * the advancement and statistics JSON API, a player-head proxy and a live SSE
+ * stream. Player data is built on the server thread; heads and SSE run on the
+ * web executor.
  */
 public final class StatsWebServer {
     private static final Gson GSON = new GsonBuilder().disableHtmlEscaping().create();
@@ -43,15 +45,18 @@ public final class StatsWebServer {
 
     private final MinecraftServer minecraftServer;
     private final AdvancementSystem adv;
+    private final StatsApi stats;
     private final LuStatsConfig config;
 
     private HttpServer httpServer;
     private ExecutorService executor;
     private String address = "disabled";
 
-    public StatsWebServer(final MinecraftServer minecraftServer, final AdvancementSystem adv, final LuStatsConfig config) {
+    public StatsWebServer(final MinecraftServer minecraftServer, final AdvancementSystem adv, final StatsApi stats,
+                          final LuStatsConfig config) {
         this.minecraftServer = minecraftServer;
         this.adv = adv;
+        this.stats = stats;
         this.config = config;
     }
 
@@ -68,6 +73,27 @@ public final class StatsWebServer {
             httpServer.createContext("/api/advancement", this::handleAdvancement);
             httpServer.createContext("/api/events", this::handleEvents);
             httpServer.createContext("/api/head", this::handleHead);
+            httpServer.createContext("/api/stats/catalog", exchange -> serveJson(exchange, stats::catalog, null));
+            httpServer.createContext("/api/stats/overview", exchange -> serveJson(exchange, stats::overview, null));
+            httpServer.createContext("/api/stats/top", exchange -> {
+                String key = query(exchange).get("key");
+                serveJson(exchange, () -> stats.board(key), "Statistik nicht gefunden");
+            });
+            httpServer.createContext("/api/stats/player", exchange -> {
+                String name = query(exchange).get("name");
+                serveJson(exchange, () -> stats.player(name), "Spieler nicht gefunden oder ausgeblendet");
+            });
+            httpServer.createContext("/api/feed", exchange -> {
+                Map<String, String> q = query(exchange);
+                long after = parseLong(q.get("after"));
+                int limit = (int) Math.min(Integer.MAX_VALUE, parseLong(q.get("limit")));
+                serveJson(exchange, () -> stats.feed(after, limit, q.get("type"), q.get("player")), null);
+            });
+            httpServer.createContext("/api/deaths", exchange -> serveJson(exchange, stats::deaths, null));
+            httpServer.createContext("/api/movement", exchange -> {
+                String name = query(exchange).get("name");
+                serveJson(exchange, () -> stats.movement(name), "Spieler nicht gefunden oder ausgeblendet");
+            });
             executor = Executors.newCachedThreadPool(runnable -> {
                 Thread thread = new Thread(runnable, "LuStats Web");
                 thread.setDaemon(true);
@@ -271,6 +297,38 @@ public final class StatsWebServer {
     }
 
     // ---- helpers ----
+
+    private static final Object NOT_FOUND = new Object();
+
+    /** Builds a payload on the server thread and sends it as JSON; null from the supplier is a 404. */
+    private void serveJson(final HttpExchange exchange, final Supplier<Object> supplier, final String notFound) throws IOException {
+        if (!isRead(exchange)) {
+            methodNotAllowed(exchange);
+            return;
+        }
+        Object json = onServer(() -> {
+            Object payload = supplier.get();
+            return payload == null ? NOT_FOUND : GSON.toJson(payload);
+        });
+        if (json == null) {
+            sendJson(exchange, 500, "{\"error\":\"Interner Fehler\"}");
+        } else if (json == NOT_FOUND) {
+            sendJson(exchange, 404, GSON.toJson(Map.of("error", notFound == null ? "Nicht gefunden" : notFound)));
+        } else {
+            sendJson(exchange, 200, (String) json);
+        }
+    }
+
+    private static long parseLong(final String value) {
+        if (value == null || value.isBlank()) {
+            return 0;
+        }
+        try {
+            return Math.max(0, Long.parseLong(value.trim()));
+        } catch (NumberFormatException exception) {
+            return 0;
+        }
+    }
 
     private <T> T onServer(final Supplier<T> supplier) {
         CompletableFuture<T> future = new CompletableFuture<>();
