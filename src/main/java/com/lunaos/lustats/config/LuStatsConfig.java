@@ -14,6 +14,12 @@ public final class LuStatsConfig {
         public String bindAddress = "0.0.0.0";
         public int port = 8765;
         public int requestTimeoutSeconds = 10;
+        /** Title shown in the dashboard header and tab. */
+        public String siteTitle = "Lu-Stats";
+        /** Allow players to hide themselves from the dashboard via /lustats privat. */
+        public boolean allowPrivate = true;
+        /** Max concurrent live (SSE) connections per IP. */
+        public int maxLiveConnectionsPerIp = 6;
     }
 
     public static final class Display {

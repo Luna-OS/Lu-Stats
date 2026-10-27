@@ -357,22 +357,10 @@ export function icon(id) {
 const SKIN = ["#f1c7a5", "#e0ac84", "#c68a63", "#a46a46", "#7d4a2f", "#5a3522"];
 const HAIR = ["#2b1b10", "#4a2f1b", "#7a4a22", "#c8a14a", "#e4d18a", "#8a2c1a", "#3a3a3a", "#d9d9d9", "#5b3a8c", "#2f6f8f"];
 const EYES = ["#3b6fd1", "#3e8f3a", "#6b4a2b", "#2b2b2b", "#7a5bc0"];
+// Lu-Stats: real player heads (current skin) via the server-side head proxy.
+// The server resolves the skin, crops the head (+hat overlay) and caches it;
+// a deterministic generated head is served as a fallback. Same-origin URL, so
+// it satisfies the strict CSP (img-src 'self').
 export function avatar(name) {
-  return memo("ava:" + name, () => {
-    const r = rng(hash(name.toLowerCase()));
-    const skin = SKIN[Math.floor(r() * SKIN.length)], hair = HAIR[Math.floor(r() * HAIR.length)], eye = EYES[Math.floor(r() * EYES.length)];
-    const skinD = shade(skin, -0.18), hairL = shade(hair, 0.18);
-    const [c, g] = canvas(8, 8);
-    const put = (x, y, col) => { g.fillStyle = col; g.fillRect(x, y, 1, 1); };
-    for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) put(x, y, skin);
-    const fringe = 1 + Math.floor(r() * 2);
-    for (let x = 0; x < 8; x++) { put(x, 0, r() < 0.3 ? hairL : hair); put(x, 1, hair); if (fringe > 1 && (x < 2 || x > 5 || r() < 0.4)) put(x, 2, hair); }
-    if (r() < 0.6) { put(0, 3, hair); put(7, 3, hair); }
-    put(1, 4, "#ffffff"); put(2, 4, eye); put(5, 4, eye); put(6, 4, "#ffffff");
-    put(3, 5, skinD); put(4, 5, skinD);
-    const beard = r() < 0.25;
-    for (let x = 2; x < 6; x++) put(x, 6, beard ? hair : x === 2 || x === 5 ? skin : shade(skin, -0.35));
-    if (beard) { for (let x = 1; x < 7; x++) put(x, 7, hair); }
-    return c.toDataURL();
-  });
+  return "/api/head?name=" + encodeURIComponent(name);
 }

@@ -3,7 +3,7 @@
   "id": "lustats",
   "version": "${version}",
   "name": "Lu-Stats",
-  "description": "Server-side Minecraft statistics dashboard with a live web interface: player profiles, cross-linked mob kills & deaths, AFK and full movement tracking with a heatmap, a live event timeline, and player comparison.",
+  "description": "Server-side Minecraft advancement tracker with a live, BACAP-style web dashboard: per-player advancement progress, real player-skin heads, a live unlock feed, player comparison, and a per-player /lustats privat opt-out. Also tracks deaths, AFK and movement.",
   "authors": [
     "LunaOS"
   ],

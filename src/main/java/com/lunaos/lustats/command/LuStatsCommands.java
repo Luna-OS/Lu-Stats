@@ -40,6 +40,8 @@ import static net.minecraft.commands.Commands.literal;
 
 public final class LuStatsCommands {
     private static final Permission EDIT_STATS_PERMISSION = new Permission.HasCommandLevel(PermissionLevel.GAMEMASTERS);
+    private static final java.util.function.Predicate<CommandSourceStack> OP =
+        source -> source.permissions().hasPermission(EDIT_STATS_PERMISSION);
     private static final int MAX_CHAT_ROWS = 20;
 
     private LuStatsCommands() {
@@ -48,30 +50,37 @@ public final class LuStatsCommands {
     public static void register() {
         CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, environment) -> dispatcher.register(
             literal("lustats")
-                .requires(source -> source.permissions().hasPermission(EDIT_STATS_PERMISSION))
                 .executes(LuStatsCommands::help)
                 .then(literal("help")
                     .executes(LuStatsCommands::help))
-                .then(literal("reload")
-                    .executes(LuStatsCommands::reload))
                 .then(literal("web")
                     .executes(LuStatsCommands::web))
+                .then(literal("privat")
+                    .executes(LuStatsCommands::privat))
+                .then(literal("reload")
+                    .requires(OP)
+                    .executes(LuStatsCommands::reload))
                 .then(literal("hide")
+                    .requires(OP)
                     .then(argument("player", StringArgumentType.word())
                         .suggests(LuStatsCommands::suggestPlayers)
                         .executes(context -> setHidden(context, true))))
                 .then(literal("unhide")
+                    .requires(OP)
                     .then(argument("player", StringArgumentType.word())
                         .suggests(LuStatsCommands::suggestHiddenPlayers)
                         .executes(context -> setHidden(context, false))))
                 .then(literal("hidden")
+                    .requires(OP)
                     .executes(LuStatsCommands::listHidden))
                 .then(literal("stats")
+                    .requires(OP)
                     .executes(context -> listStats(context, ""))
                     .then(argument("search", StringArgumentType.greedyString())
                         .suggests(LuStatsCommands::suggestStats)
                         .executes(context -> listStats(context, StringArgumentType.getString(context, "search")))))
                 .then(literal("player")
+                    .requires(OP)
                     .then(argument("player", StringArgumentType.word())
                         .suggests(LuStatsCommands::suggestPlayers)
                         .executes(context -> playerStats(context, ""))
@@ -79,6 +88,7 @@ public final class LuStatsCommands {
                             .suggests(LuStatsCommands::suggestStats)
                             .executes(context -> playerStats(context, StringArgumentType.getString(context, "search"))))))
                 .then(literal("get")
+                    .requires(OP)
                     .then(argument("player", StringArgumentType.word())
                         .suggests(LuStatsCommands::suggestPlayers)
                         .executes(context -> playerStats(context, ""))
@@ -86,6 +96,7 @@ public final class LuStatsCommands {
                             .suggests(LuStatsCommands::suggestStats)
                             .executes(LuStatsCommands::get))))
                 .then(literal("set")
+                    .requires(OP)
                     .then(argument("player", StringArgumentType.word())
                         .suggests(LuStatsCommands::suggestPlayers)
                         .then(argument("amount", IntegerArgumentType.integer(0))
@@ -93,6 +104,7 @@ public final class LuStatsCommands {
                                 .suggests(LuStatsCommands::suggestStats)
                                 .executes(context -> set(context, false))))))
                 .then(literal("add")
+                    .requires(OP)
                     .then(argument("player", StringArgumentType.word())
                         .suggests(LuStatsCommands::suggestPlayers)
                         .then(argument("amount", IntegerArgumentType.integer())
@@ -104,8 +116,9 @@ public final class LuStatsCommands {
 
     private static int help(final CommandContext<CommandSourceStack> context) {
         context.getSource().sendSuccess(() -> Component.literal("""
-            LuStats commands:
+            Lu-Stats commands:
             /lustats web
+            /lustats privat  (hide/show yourself on the website)
             /lustats reload
             /lustats hide <online/offline player or uuid>
             /lustats unhide <online/offline player or uuid>
@@ -127,7 +140,28 @@ public final class LuStatsCommands {
     }
 
     private static int web(final CommandContext<CommandSourceStack> context) {
-        context.getSource().sendSuccess(() -> Component.literal("LuStats web dashboard: " + LuStatsMod.webAddress()), false);
+        context.getSource().sendSuccess(() -> Component.literal("Lu-Stats web dashboard: " + LuStatsMod.webAddress()), false);
+        return 1;
+    }
+
+    /** Player-executable opt-out: toggles the player's own visibility on the dashboard. */
+    private static int privat(final CommandContext<CommandSourceStack> context) {
+        ServerPlayer player = context.getSource().getPlayer();
+        if (player == null) {
+            context.getSource().sendFailure(Component.literal("Nur Spieler koennen /lustats privat benutzen."));
+            return 0;
+        }
+        if (!LuStatsMod.config().web.allowPrivate) {
+            context.getSource().sendFailure(Component.literal("Diese Funktion ist auf dem Server ausgeschaltet."));
+            return 0;
+        }
+        boolean hidden = LuStatsMod.consent().toggleHidden(player.getUUID(), player.getGameProfile().name());
+        if (LuStatsMod.advancementSystem() != null) {
+            LuStatsMod.advancementSystem().invalidate();
+        }
+        context.getSource().sendSuccess(() -> Component.literal(hidden
+            ? "Du bist jetzt auf der Lu-Stats Website ausgeblendet: keine Spielerseite, nicht in der Rangliste, keine Live-Meldungen. Nochmal /lustats privat macht dich wieder sichtbar."
+            : "Du bist auf der Lu-Stats Website wieder sichtbar."), false);
         return 1;
     }
 

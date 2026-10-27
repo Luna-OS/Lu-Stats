@@ -1,13 +1,10 @@
 package com.lunaos.lustats.web;
 
-import com.lunaos.lustats.LuStatsMod;
-import com.lunaos.lustats.config.LuStatsConfig;
-import com.lunaos.lustats.stats.StatsService;
-import com.lunaos.lustats.stats.StatsSnapshotDto;
-import com.lunaos.lustats.tracking.ActivityTracker;
-import com.lunaos.lustats.tracking.GameEvent;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
+import com.lunaos.lustats.LuStatsMod;
+import com.lunaos.lustats.adv.AdvancementSystem;
+import com.lunaos.lustats.config.LuStatsConfig;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import net.minecraft.server.MinecraftServer;
@@ -20,33 +17,41 @@ import java.net.Inet4Address;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.NetworkInterface;
+import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.util.Enumeration;
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 import java.util.zip.GZIPOutputStream;
 
+/**
+ * Serves the BACAP-style dashboard: the static {@code /web} single-page app plus
+ * the advancement JSON API, a player-head proxy and a live SSE stream. Player
+ * data is built on the server thread; heads and SSE run on the web executor.
+ */
 public final class StatsWebServer {
-    private static final Gson GSON = new GsonBuilder()
-        .disableHtmlEscaping()
-        .create();
+    private static final Gson GSON = new GsonBuilder().disableHtmlEscaping().create();
+    private static final String CSP =
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+        + "img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; "
+        + "frame-ancestors 'none'; base-uri 'none'; form-action 'none'; object-src 'none'";
 
     private final MinecraftServer minecraftServer;
-    private final StatsService statsService;
+    private final AdvancementSystem adv;
     private final LuStatsConfig config;
 
     private HttpServer httpServer;
     private ExecutorService executor;
     private String address = "disabled";
 
-    public StatsWebServer(final MinecraftServer minecraftServer, final StatsService statsService, final LuStatsConfig config) {
+    public StatsWebServer(final MinecraftServer minecraftServer, final AdvancementSystem adv, final LuStatsConfig config) {
         this.minecraftServer = minecraftServer;
-        this.statsService = statsService;
+        this.adv = adv;
         this.config = config;
     }
 
@@ -55,13 +60,15 @@ public final class StatsWebServer {
             InetAddress bindAddress = InetAddress.getByName(config.web.bindAddress);
             InetSocketAddress socketAddress = new InetSocketAddress(bindAddress, config.web.port);
             httpServer = HttpServer.create(socketAddress, 0);
-            httpServer.createContext("/", this::handleIndex);
-            httpServer.createContext("/favicon.png", this::handleFavicon);
-            httpServer.createContext("/api/stats", this::handleStats);
+            httpServer.createContext("/", this::handleRoot);
+            httpServer.createContext("/api/info", this::handleInfo);
+            httpServer.createContext("/api/advancements", this::handleAdvancements);
+            httpServer.createContext("/api/players", this::handlePlayers);
+            httpServer.createContext("/api/player", this::handlePlayer);
+            httpServer.createContext("/api/advancement", this::handleAdvancement);
             httpServer.createContext("/api/events", this::handleEvents);
-            httpServer.createContext("/api/activity", this::handleActivity);
-            httpServer.createContext("/api/movement", this::handleMovement);
-            executor = Executors.newFixedThreadPool(6, runnable -> {
+            httpServer.createContext("/api/head", this::handleHead);
+            executor = Executors.newCachedThreadPool(runnable -> {
                 Thread thread = new Thread(runnable, "LuStats Web");
                 thread.setDaemon(true);
                 return thread;
@@ -69,14 +76,11 @@ public final class StatsWebServer {
             httpServer.setExecutor(executor);
             httpServer.start();
             address = displayAddress();
-            LuStatsMod.LOGGER.info(
-                "LuStats web dashboard listening on {}:{}; open {}",
-                config.web.bindAddress,
-                config.web.port,
-                address
-            );
+            LuStatsMod.LOGGER.info("Lu-Stats web dashboard listening on {}:{}; open {}",
+                config.web.bindAddress, config.web.port, address);
         } catch (IOException exception) {
-            LuStatsMod.LOGGER.error("Failed to start LuStats web dashboard on {}:{}.", config.web.bindAddress, config.web.port, exception);
+            LuStatsMod.LOGGER.error("Failed to start Lu-Stats web dashboard on {}:{}.",
+                config.web.bindAddress, config.web.port, exception);
         }
     }
 
@@ -88,7 +92,7 @@ public final class StatsWebServer {
                 executor.shutdownNow();
                 executor = null;
             }
-            LuStatsMod.LOGGER.info("LuStats web dashboard stopped.");
+            LuStatsMod.LOGGER.info("Lu-Stats web dashboard stopped.");
         }
     }
 
@@ -98,6 +102,272 @@ public final class StatsWebServer {
 
     public String address() {
         return address;
+    }
+
+    // ---- static assets + SPA ----
+
+    private void handleRoot(final HttpExchange exchange) throws IOException {
+        if (!isRead(exchange)) {
+            methodNotAllowed(exchange);
+            return;
+        }
+        String path = exchange.getRequestURI().getPath();
+        if (path == null || path.equals("/")) {
+            serveAsset(exchange, "index.html");
+            return;
+        }
+        if (path.contains("..")) {
+            sendText(exchange, 400, "Bad request");
+            return;
+        }
+        String resource = path.startsWith("/") ? path.substring(1) : path;
+        if (hasAsset(resource)) {
+            serveAsset(exchange, resource);
+            return;
+        }
+        // SPA fallback: unknown non-API path -> index.html (client router handles it).
+        serveAsset(exchange, "index.html");
+    }
+
+    private boolean hasAsset(final String resource) {
+        try (InputStream stream = StatsWebServer.class.getResourceAsStream("/web/" + resource)) {
+            return stream != null;
+        } catch (IOException exception) {
+            return false;
+        }
+    }
+
+    private void serveAsset(final HttpExchange exchange, final String resource) throws IOException {
+        try (InputStream stream = StatsWebServer.class.getResourceAsStream("/web/" + resource)) {
+            if (stream == null) {
+                sendText(exchange, 404, "Nicht gefunden");
+                return;
+            }
+            byte[] bytes = stream.readAllBytes();
+            String cache = resource.startsWith("fonts/") ? "public, max-age=604800" : "no-cache";
+            send(exchange, 200, contentType(resource), bytes, cache);
+        }
+    }
+
+    private static String contentType(final String resource) {
+        String lower = resource.toLowerCase();
+        if (lower.endsWith(".html")) return "text/html; charset=utf-8";
+        if (lower.endsWith(".css")) return "text/css; charset=utf-8";
+        if (lower.endsWith(".js")) return "text/javascript; charset=utf-8";
+        if (lower.endsWith(".svg")) return "image/svg+xml";
+        if (lower.endsWith(".otf")) return "font/otf";
+        if (lower.endsWith(".ttf")) return "font/ttf";
+        if (lower.endsWith(".png")) return "image/png";
+        if (lower.endsWith(".txt")) return "text/plain; charset=utf-8";
+        if (lower.endsWith(".json")) return "application/json; charset=utf-8";
+        return "application/octet-stream";
+    }
+
+    // ---- JSON API ----
+
+    private void handleInfo(final HttpExchange exchange) throws IOException {
+        if (!isRead(exchange)) {
+            methodNotAllowed(exchange);
+            return;
+        }
+        sendJson(exchange, 200, GSON.toJson(adv.info()));
+    }
+
+    private void handleAdvancements(final HttpExchange exchange) throws IOException {
+        if (!isRead(exchange)) {
+            methodNotAllowed(exchange);
+            return;
+        }
+        sendJson(exchange, 200, GSON.toJson(adv.index()));
+    }
+
+    private void handlePlayers(final HttpExchange exchange) throws IOException {
+        if (!isRead(exchange)) {
+            methodNotAllowed(exchange);
+            return;
+        }
+        String json = onServer(() -> GSON.toJson(adv.players()));
+        if (json == null) {
+            sendJson(exchange, 500, "{\"error\":\"Interner Fehler\"}");
+        } else {
+            sendJson(exchange, 200, json);
+        }
+    }
+
+    private void handlePlayer(final HttpExchange exchange) throws IOException {
+        if (!isRead(exchange)) {
+            methodNotAllowed(exchange);
+            return;
+        }
+        String name = query(exchange).get("name");
+        if (name == null || name.isBlank()) {
+            sendJson(exchange, 400, "{\"error\":\"name fehlt\"}");
+            return;
+        }
+        String json = onServer(() -> {
+            var detail = adv.player(name);
+            return detail == null ? null : GSON.toJson(detail);
+        });
+        if (json == null) {
+            sendJson(exchange, 404, "{\"error\":\"Spieler nicht gefunden oder ausgeblendet\"}");
+        } else {
+            sendJson(exchange, 200, json);
+        }
+    }
+
+    private void handleAdvancement(final HttpExchange exchange) throws IOException {
+        if (!isRead(exchange)) {
+            methodNotAllowed(exchange);
+            return;
+        }
+        String id = query(exchange).get("id");
+        if (id == null || id.isBlank()) {
+            sendJson(exchange, 400, "{\"error\":\"id fehlt\"}");
+            return;
+        }
+        String json = onServer(() -> {
+            var detail = adv.advancement(id);
+            return detail == null ? null : GSON.toJson(detail);
+        });
+        if (json == null) {
+            sendJson(exchange, 404, "{\"error\":\"Advancement nicht gefunden\"}");
+        } else {
+            sendJson(exchange, 200, json);
+        }
+    }
+
+    private void handleEvents(final HttpExchange exchange) throws IOException {
+        if (!isRead(exchange)) {
+            methodNotAllowed(exchange);
+            return;
+        }
+        if (!adv.live()) {
+            sendJson(exchange, 404, "{\"error\":\"Live-Updates sind ausgeschaltet\"}");
+            return;
+        }
+        if ("HEAD".equalsIgnoreCase(exchange.getRequestMethod())) {
+            applySecurity(exchange);
+            exchange.sendResponseHeaders(200, -1);
+            exchange.close();
+            return;
+        }
+        applySecurity(exchange);
+        adv.sse().serve(exchange, adv.index().version);
+    }
+
+    private void handleHead(final HttpExchange exchange) throws IOException {
+        if (!isRead(exchange)) {
+            methodNotAllowed(exchange);
+            return;
+        }
+        Map<String, String> q = query(exchange);
+        String name = q.getOrDefault("name", q.get("player"));
+        if (name == null || name.isBlank()) {
+            sendText(exchange, 400, "name fehlt");
+            return;
+        }
+        byte[] png = adv.head(name);
+        send(exchange, 200, "image/png", png, "public, max-age=600");
+    }
+
+    // ---- helpers ----
+
+    private <T> T onServer(final Supplier<T> supplier) {
+        CompletableFuture<T> future = new CompletableFuture<>();
+        minecraftServer.execute(() -> {
+            try {
+                future.complete(supplier.get());
+            } catch (Exception exception) {
+                future.completeExceptionally(exception);
+            }
+        });
+        try {
+            return future.get(config.web.requestTimeoutSeconds, TimeUnit.SECONDS);
+        } catch (Exception exception) {
+            LuStatsMod.LOGGER.warn("Lu-Stats web request failed.", exception);
+            return null;
+        }
+    }
+
+    private Map<String, String> query(final HttpExchange exchange) {
+        Map<String, String> out = new HashMap<>();
+        String raw = exchange.getRequestURI().getRawQuery();
+        if (raw == null || raw.isBlank()) {
+            return out;
+        }
+        for (String pair : raw.split("&")) {
+            int eq = pair.indexOf('=');
+            if (eq < 0) {
+                out.put(decode(pair), "");
+            } else {
+                out.put(decode(pair.substring(0, eq)), decode(pair.substring(eq + 1)));
+            }
+        }
+        return out;
+    }
+
+    private static String decode(final String value) {
+        return URLDecoder.decode(value, StandardCharsets.UTF_8);
+    }
+
+    private static boolean isRead(final HttpExchange exchange) {
+        String method = exchange.getRequestMethod();
+        return "GET".equalsIgnoreCase(method) || "HEAD".equalsIgnoreCase(method);
+    }
+
+    private void methodNotAllowed(final HttpExchange exchange) throws IOException {
+        exchange.getResponseHeaders().set("Allow", "GET, HEAD");
+        sendJson(exchange, 405, "{\"error\":\"Nur GET erlaubt\"}");
+    }
+
+    private void applySecurity(final HttpExchange exchange) {
+        exchange.getResponseHeaders().set("X-Content-Type-Options", "nosniff");
+        exchange.getResponseHeaders().set("Referrer-Policy", "no-referrer");
+        exchange.getResponseHeaders().set("X-Frame-Options", "DENY");
+        exchange.getResponseHeaders().set("Content-Security-Policy", CSP);
+    }
+
+    private void sendJson(final HttpExchange exchange, final int status, final String body) throws IOException {
+        send(exchange, status, "application/json; charset=utf-8", body.getBytes(StandardCharsets.UTF_8), "no-store");
+    }
+
+    private void sendText(final HttpExchange exchange, final int status, final String body) throws IOException {
+        send(exchange, status, "text/plain; charset=utf-8", body.getBytes(StandardCharsets.UTF_8), "no-store");
+    }
+
+    private void send(final HttpExchange exchange, final int status, final String contentType,
+                      byte[] bytes, final String cacheControl) throws IOException {
+        applySecurity(exchange);
+        exchange.getResponseHeaders().set("Content-Type", contentType);
+        exchange.getResponseHeaders().set("Cache-Control", cacheControl);
+        boolean head = "HEAD".equalsIgnoreCase(exchange.getRequestMethod());
+
+        String acceptEncoding = exchange.getRequestHeaders().getFirst("Accept-Encoding");
+        boolean gzip = !head && acceptEncoding != null && acceptEncoding.contains("gzip") && gzipable(contentType);
+        if (gzip) {
+            ByteArrayOutputStream compressed = new ByteArrayOutputStream();
+            try (GZIPOutputStream out = new GZIPOutputStream(compressed)) {
+                out.write(bytes);
+            }
+            bytes = compressed.toByteArray();
+            exchange.getResponseHeaders().set("Content-Encoding", "gzip");
+            exchange.getResponseHeaders().set("Vary", "Accept-Encoding");
+        }
+
+        if (head) {
+            exchange.sendResponseHeaders(status, -1);
+            exchange.close();
+            return;
+        }
+        exchange.sendResponseHeaders(status, bytes.length);
+        try (OutputStream stream = exchange.getResponseBody()) {
+            stream.write(bytes);
+        }
+    }
+
+    private static boolean gzipable(final String contentType) {
+        return contentType.startsWith("text/") || contentType.contains("json")
+            || contentType.contains("javascript") || contentType.contains("svg") || contentType.contains("font");
     }
 
     private String displayAddress() {
@@ -117,233 +387,30 @@ public final class StatsWebServer {
                 if (!networkInterface.isUp() || networkInterface.isLoopback() || networkInterface.isVirtual()) {
                     continue;
                 }
-
                 Enumeration<InetAddress> addresses = networkInterface.getInetAddresses();
                 while (addresses.hasMoreElements()) {
-                    InetAddress address = addresses.nextElement();
-                    if (!(address instanceof Inet4Address)
-                        || address.isLoopbackAddress()
-                        || address.isAnyLocalAddress()
-                        || address.isMulticastAddress()
-                        || address.isLinkLocalAddress()) {
+                    InetAddress candidate = addresses.nextElement();
+                    if (!(candidate instanceof Inet4Address)
+                        || candidate.isLoopbackAddress()
+                        || candidate.isAnyLocalAddress()
+                        || candidate.isMulticastAddress()
+                        || candidate.isLinkLocalAddress()) {
                         continue;
                     }
-                    if (address.isSiteLocalAddress()) {
-                        return address.getHostAddress();
+                    if (candidate.isSiteLocalAddress()) {
+                        return candidate.getHostAddress();
                     }
                     if (fallback == null) {
-                        fallback = address.getHostAddress();
+                        fallback = candidate.getHostAddress();
                     }
                 }
             }
-
             if (fallback != null) {
                 return fallback;
             }
-
-            InetAddress localHost = InetAddress.getLocalHost();
-            if (localHost instanceof Inet4Address
-                && !localHost.isLoopbackAddress()
-                && !localHost.isAnyLocalAddress()
-                && !localHost.isMulticastAddress()
-                && !localHost.isLinkLocalAddress()) {
-                return localHost.getHostAddress();
-            }
         } catch (Exception exception) {
-            LuStatsMod.LOGGER.debug("Failed to detect local LuStats dashboard address.", exception);
+            LuStatsMod.LOGGER.debug("Failed to detect local Lu-Stats dashboard address.", exception);
         }
-
         return "localhost";
-    }
-
-    private void handleIndex(final HttpExchange exchange) throws IOException {
-        if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
-            send(exchange, 405, "text/plain", "Method not allowed");
-            return;
-        }
-
-        send(exchange, 200, "text/html", indexHtml());
-    }
-
-    private void handleFavicon(final HttpExchange exchange) throws IOException {
-        if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
-            send(exchange, 405, "text/plain", "Method not allowed");
-            return;
-        }
-
-        try (InputStream stream = StatsWebServer.class.getResourceAsStream("/assets/lustats/icon.png")) {
-            if (stream == null) {
-                send(exchange, 404, "text/plain", "Not found");
-                return;
-            }
-            send(exchange, 200, "image/png", stream.readAllBytes());
-        }
-    }
-
-    private void handleStats(final HttpExchange exchange) throws IOException {
-        if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
-            send(exchange, 405, "application/json", "{\"error\":\"Method not allowed\"}");
-            return;
-        }
-
-        CompletableFuture<StatsSnapshotDto> future = new CompletableFuture<>();
-        minecraftServer.execute(() -> {
-            try {
-                future.complete(statsService.snapshot());
-            } catch (Exception exception) {
-                future.completeExceptionally(exception);
-            }
-        });
-
-        try {
-            StatsSnapshotDto snapshot = future.get(config.web.requestTimeoutSeconds, TimeUnit.SECONDS);
-            send(exchange, 200, "application/json", GSON.toJson(snapshot));
-        } catch (Exception exception) {
-            LuStatsMod.LOGGER.warn("Failed to create LuStats web snapshot.", exception);
-            send(exchange, 500, "application/json", "{\"error\":\"Failed to collect statistics\"}");
-        }
-    }
-
-    private void handleEvents(final HttpExchange exchange) throws IOException {
-        if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
-            send(exchange, 405, "application/json", "{\"error\":\"Method not allowed\"}");
-            return;
-        }
-
-        Map<String, String> query = parseQuery(exchange);
-        long after = parseLong(query.get("after"), 0);
-        int limit = (int) parseLong(query.get("limit"), 300);
-
-        EventsResponse response = new EventsResponse();
-        response.latestSeq = statsService.eventLog().latestSeq();
-        response.events = statsService.eventLog().since(after, limit);
-        send(exchange, 200, "application/json", GSON.toJson(response));
-    }
-
-    private void handleActivity(final HttpExchange exchange) throws IOException {
-        if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
-            send(exchange, 405, "application/json", "{\"error\":\"Method not allowed\"}");
-            return;
-        }
-
-        CompletableFuture<List<ActivityTracker.PlayerActivityDto>> future = new CompletableFuture<>();
-        minecraftServer.execute(() -> {
-            try {
-                future.complete(statsService.activityTracker().snapshot(minecraftServer));
-            } catch (Exception exception) {
-                future.completeExceptionally(exception);
-            }
-        });
-
-        try {
-            ActivityResponse response = new ActivityResponse();
-            response.generatedAt = java.time.Instant.now().toString();
-            response.players = future.get(config.web.requestTimeoutSeconds, TimeUnit.SECONDS);
-            send(exchange, 200, "application/json", GSON.toJson(response));
-        } catch (Exception exception) {
-            LuStatsMod.LOGGER.warn("Failed to create LuStats activity snapshot.", exception);
-            send(exchange, 500, "application/json", "{\"error\":\"Failed to collect activity\"}");
-        }
-    }
-
-    private void handleMovement(final HttpExchange exchange) throws IOException {
-        if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
-            send(exchange, 405, "application/json", "{\"error\":\"Method not allowed\"}");
-            return;
-        }
-
-        Map<String, String> query = parseQuery(exchange);
-        String player = query.get("player");
-        int maxPoints = (int) parseLong(query.get("maxPoints"), 0);
-        ActivityTracker.MovementDto movement = statsService.activityTracker().movement(player, maxPoints);
-        send(exchange, 200, "application/json", GSON.toJson(movement));
-    }
-
-    private Map<String, String> parseQuery(final HttpExchange exchange) {
-        Map<String, String> out = new HashMap<>();
-        String raw = exchange.getRequestURI().getRawQuery();
-        if (raw == null || raw.isBlank()) {
-            return out;
-        }
-        for (String pair : raw.split("&")) {
-            int eq = pair.indexOf('=');
-            if (eq < 0) {
-                out.put(urlDecode(pair), "");
-            } else {
-                out.put(urlDecode(pair.substring(0, eq)), urlDecode(pair.substring(eq + 1)));
-            }
-        }
-        return out;
-    }
-
-    private static String urlDecode(final String value) {
-        return java.net.URLDecoder.decode(value, StandardCharsets.UTF_8);
-    }
-
-    private static long parseLong(final String value, final long fallback) {
-        if (value == null || value.isBlank()) {
-            return fallback;
-        }
-        try {
-            return Long.parseLong(value.trim());
-        } catch (NumberFormatException exception) {
-            return fallback;
-        }
-    }
-
-    private static final class EventsResponse {
-        long latestSeq;
-        List<GameEvent> events;
-    }
-
-    private static final class ActivityResponse {
-        String generatedAt;
-        List<ActivityTracker.PlayerActivityDto> players;
-    }
-
-    private void send(final HttpExchange exchange, final int status, final String contentType, final String body) throws IOException {
-        send(exchange, status, contentType + "; charset=utf-8", body.getBytes(StandardCharsets.UTF_8));
-    }
-
-    private void send(final HttpExchange exchange, final int status, final String contentType, byte[] bytes) throws IOException {
-        if (exchange.getRequestHeaders().getFirst("Accept-Encoding") != null
-            && exchange.getRequestHeaders().getFirst("Accept-Encoding").contains("gzip")) {
-            ByteArrayOutputStream compressed = new ByteArrayOutputStream();
-            try (GZIPOutputStream gzip = new GZIPOutputStream(compressed)) {
-                gzip.write(bytes);
-            }
-            bytes = compressed.toByteArray();
-            exchange.getResponseHeaders().set("Content-Encoding", "gzip");
-            exchange.getResponseHeaders().set("Vary", "Accept-Encoding");
-        }
-        exchange.getResponseHeaders().set("Content-Type", contentType);
-        exchange.getResponseHeaders().set("Cache-Control", "no-store");
-        exchange.getResponseHeaders().set("Content-Security-Policy", "default-src 'none'; connect-src 'self'; img-src 'self' data:; script-src 'unsafe-inline'; style-src 'unsafe-inline'; frame-ancestors 'none'");
-        exchange.getResponseHeaders().set("Referrer-Policy", "no-referrer");
-        exchange.getResponseHeaders().set("X-Content-Type-Options", "nosniff");
-        exchange.sendResponseHeaders(status, bytes.length);
-        try (OutputStream stream = exchange.getResponseBody()) {
-            stream.write(bytes);
-        }
-    }
-
-    private static volatile String cachedIndexHtml;
-
-    private String indexHtml() {
-        String cached = cachedIndexHtml;
-        if (cached != null) {
-            return cached;
-        }
-        try (InputStream stream = StatsWebServer.class.getResourceAsStream("/assets/lustats/index.html")) {
-            if (stream == null) {
-                return "<!doctype html><title>Lu-Stats</title><p>Dashboard resource missing.</p>";
-            }
-            cached = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
-            cachedIndexHtml = cached;
-            return cached;
-        } catch (IOException exception) {
-            LuStatsMod.LOGGER.error("Failed to load Lu-Stats dashboard page.", exception);
-            return "<!doctype html><title>Lu-Stats</title><p>Failed to load dashboard. Check the server log.</p>";
-        }
     }
 }

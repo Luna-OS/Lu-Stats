@@ -62,8 +62,15 @@ public final class EventHooks {
         });
     }
 
-    /** Called from the mixin when a player completes an advancement. */
+    /** Called from the mixin when a player completes/updates an advancement. */
     public static void onAdvancement(final ServerPlayer player, final AdvancementHolder holder) {
+        if (player != null && holder != null) {
+            com.lunaos.lustats.adv.AdvancementSystem system = LuStatsMod.advancementSystem();
+            if (system != null) {
+                system.onAdvancement(player, holder);
+            }
+        }
+
         EventLog log = log();
         if (log == null || !advancementsEnabled() || player == null || holder == null) {
             return;

@@ -2,6 +2,35 @@
 
 All notable changes to Lu-Stats will be documented in this file.
 
+## [1.1.0] - 2026-10-27
+
+### Added
+- Completely reworked dashboard in the **BACAP Tracker** web-GUI style (pixel /
+  inventory look, Monocraft font, light/dark theme): Start/leaderboard, the
+  advancement explorer, per-player pages, per-advancement pages and player
+  comparison.
+- **Advancement/achievement tracking** built from the live advancement registry
+  (covers the BlazeandCave's Advancements Pack datapack and vanilla), enriched
+  with a bundled BACAP documentation overlay. New API: `/api/info`,
+  `/api/advancements`, `/api/players`, `/api/player`, `/api/advancement` and an
+  SSE `/api/events` live stream with in-game-style unlock toasts.
+- **Real player heads** (current skin) via a server-side head proxy
+  (`/api/head`), resolving skins by name so it works on offline-mode servers;
+  cached, with a generated fallback head.
+- **Player opt-out**: `/lustats privat` lets any player hide themselves from the
+  dashboard (no operator needed); default is visible. Toggle gated by
+  `web.allowPrivate`.
+- Config: `web.siteTitle`, `web.allowPrivate`, `web.maxLiveConnectionsPerIp`.
+
+### Changed
+- The web server now serves the single-page dashboard from `/web` with a strict
+  same-origin CSP and SPA deep-link fallback.
+
+### Credits
+- The dashboard look, fonts (Monocraft, OFL) and the advancement documentation
+  overlay are adapted from **BACAP Tracker**; the advancement data is from
+  **BlazeandCave's Advancements Pack**.
+
 ## [1.0.0] - 2026-10-27
 
 Initial Lu-Stats release for Minecraft `26.3`, derived from

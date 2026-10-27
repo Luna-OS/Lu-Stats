@@ -149,7 +149,7 @@ function connect() {
 function renderFoot() {
   const m = S.index.meta || {};
   $("#foot").innerHTML =
-    `<span>BACAP Tracker ${esc(S.info.modVersion)}</span>` +
+    `<span>${esc(S.info.title)} ${esc(S.info.modVersion)}</span>` +
     (m.version ? `<span>Doku: offizielle BACAP-Dokumentation von Cavinator1${m.sourceUrl ? `, <a href="${esc(m.sourceUrl)}" target="_blank" rel="noopener noreferrer">BACAP ${esc(m.version)}</a>` : ` ${esc(m.version)}`}, Stand ${esc(fmtIso(m.updated))}</span>` : "") +
     `<span><a href="https://modrinth.com/datapack/blazeandcaves-advancements-pack" target="_blank" rel="noopener noreferrer">Datapack auf Modrinth</a></span>` +
     `<span>Taste <kbd>/</kbd> springt in die Suche</span>` +

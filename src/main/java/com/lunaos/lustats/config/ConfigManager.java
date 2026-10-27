@@ -82,6 +82,12 @@ public final class ConfigManager {
         if (config.web.requestTimeoutSeconds < 1) {
             config.web.requestTimeoutSeconds = 10;
         }
+        if (config.web.siteTitle == null || config.web.siteTitle.isBlank()) {
+            config.web.siteTitle = "Lu-Stats";
+        }
+        if (config.web.maxLiveConnectionsPerIp < 1) {
+            config.web.maxLiveConnectionsPerIp = 6;
+        }
         if (config.display.enabledStatTypes == null) {
             config.display.enabledStatTypes = new LuStatsConfig.Display().enabledStatTypes;
         }
