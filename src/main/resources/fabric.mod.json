@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "id": "lustats",
+  "version": "${version}",
+  "name": "Lu-Stats",
+  "description": "Server-side Minecraft statistics dashboard with a live web interface: player profiles, cross-linked mob kills & deaths, AFK and full movement tracking with a heatmap, a live event timeline, and player comparison.",
+  "authors": [
+    "LunaOS"
+  ],
+  "contributors": [
+    "deanxbox (original Stats4Us, MIT)"
+  ],
+  "license": "MIT",
+  "icon": "assets/lustats/icon.png",
+  "environment": "server",
+  "entrypoints": {
+    "main": [
+      "com.lunaos.lustats.LuStatsMod"
+    ]
+  },
+  "mixins": [
+    "lustats.mixins.json"
+  ],
+  "depends": {
+    "fabricloader": ">=0.19.3",
+    "minecraft": "~26.3",
+    "java": ">=25",
+    "fabric-api": "*"
+  }
+}

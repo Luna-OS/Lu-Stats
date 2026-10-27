@@ -1,0 +1,103 @@
+plugins {
+    id 'net.fabricmc.fabric-loom' version "${loom_version}"
+    id 'com.modrinth.minotaur' version '2.9.0'
+    id 'maven-publish'
+}
+
+version = project.mod_version
+group = project.maven_group
+
+base {
+    archivesName = project.archives_base_name
+}
+
+repositories {
+}
+
+loom {
+    runs {
+        server {
+            runDir "run"
+        }
+    }
+}
+
+dependencies {
+    minecraft "com.mojang:minecraft:${project.minecraft_version}"
+    implementation "net.fabricmc:fabric-loader:${project.loader_version}"
+    implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
+}
+
+processResources {
+    def version = project.version
+
+    inputs.property "version", version
+    filesMatching("fabric.mod.json") {
+        expand "version": version
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    it.options.encoding = "UTF-8"
+    it.options.release = 25
+}
+
+java {
+    withSourcesJar()
+    sourceCompatibility = JavaVersion.VERSION_25
+    targetCompatibility = JavaVersion.VERSION_25
+}
+
+def archiveName = base.archivesName.get()
+
+jar {
+    inputs.property 'archiveName', archiveName
+
+    from('LICENSE') {
+        rename { "${it}_${archiveName}" }
+    }
+}
+
+// Changelog for the current mod_version only (the "## <version>" section of CHANGELOG.md).
+def releaseChangelog = {
+    def text = rootProject.file('CHANGELOG.md').text
+    def matcher = text =~ /(?ms)^## \[?\Q${project.mod_version}\E\]?[^\n]*\n(.*?)(?=\n## |\z)/
+    if (!matcher.find()) {
+        throw new GradleException("CHANGELOG.md has no '## ${project.mod_version}' section")
+    }
+    matcher.group(1).trim()
+}
+
+tasks.register('printChangelog') {
+    doLast { println releaseChangelog() }
+}
+
+modrinth {
+    token = System.getenv("MODRINTH_TOKEN")
+    projectId = "lustats"
+    versionNumber = "${project.mod_version}+mc${project.minecraft_version}"
+    versionName = "v${project.mod_version} for MC ${project.minecraft_version}"
+    versionType = "release"
+    changelog = providers.provider { releaseChangelog() }
+    uploadFile = tasks.jar
+    gameVersions = project.modrinth_game_versions.split(',').collect { it.trim() }
+    loaders = ["fabric"]
+    dependencies {
+        required.project "fabric-api"
+    }
+}
+
+tasks.named('modrinth') {
+    dependsOn tasks.named('build')
+}
+
+publishing {
+    publications {
+        create("mavenJava", MavenPublication) {
+            from components.java
+        }
+    }
+
+    repositories {
+    }
+}
